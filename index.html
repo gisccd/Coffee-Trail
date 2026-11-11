@@ -77,12 +77,18 @@ const CONFIG = {
   // an image (PNG or SVG) of your own. yoffset lifts the icon so its bottom
   // tip sits on the location; use 0 for an icon that should be centered.
   selectedIcon: {
-  url: "https://cdn.jsdelivr.net/gh/gisccd/coffeetrail@main/Coffee Mug-RED (1).svg",
-  color: "#E15928",   // ignored when url is set
-  width: 24,
-  height: 24,
-  yoffset: 0
-},
+    url: "https://cdn.jsdelivr.net/gh/gisccd/coffeetrail@main/Coffee Mug-RED (1).svg",
+    color: "#E15928",   // ignored when url is set
+    width: 24,
+    height: 24,
+    yoffset: 0
+  },
+
+  // ---- Picking one location of a chain ----
+  // How much bigger the icon is for the exact location picked within a chain,
+  // and how close the map zooms to it.
+  focusedIconScale: 1.5,
+  focusedZoom: 18,
 
   returnHomeOnDeselect: true,
   smoothMotion: false
@@ -199,13 +205,14 @@ const CONFIG = {
     display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; align-items: baseline;
     padding: 7px 8px; font-size: 0.9rem; border-bottom: 1px solid var(--line);
   }
-  .locs li.here { background: var(--here); }
+  .locs li.here { background: var(--here); box-shadow: inset 3px 0 0 var(--teal); }
   .locs .ph { grid-column: 1; color: var(--muted); font-size: 0.85rem; }
   .locs .go {
     grid-column: 2; grid-row: 1; padding: 0; font: inherit; font-size: 0.8rem; font-weight: 600;
     color: var(--teal-ink); cursor: pointer; background: none; border: 0; white-space: nowrap;
   }
   .locs .go:hover { text-decoration: underline; text-underline-offset: 2px; }
+  .all-locs { margin: 6px 0 0; font-size: 0.85rem; }
 
   .empty { padding: 28px 20px; color: var(--muted); }
   .empty p { margin: 0 0 8px; }
@@ -313,14 +320,15 @@ require([
 
   // Business type groups. Shops matching none of them get OTHER, which is
   // never shown as a dropdown choice or printed in the list.
-const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.values).map(low) }));
- const OTHER = { label: "", values: [] };
+  const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.values).map(low) }));
+  const OTHER = { label: "", values: [] };
   const typeOf = (v) => TYPES.find((t) => t.values.includes(low(v))) || OTHER;
 
   /* ---------- state ---------- */
   const state = { q: "", type: "" };
   let records = [], filtered = [], byId = new Map(), recordByOid = new Map();
-  let layer = null, layerView = null, selectedId = null;
+  // focusedOid: the exact location picked within a combined chain (null = all locations)
+  let layer = null, layerView = null, selectedId = null, focusedOid = null;
   const expanded = new Set();
 
   /* ---------- map ---------- */
@@ -342,7 +350,7 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
 
   const SI = CONFIG.selectedIcon || {};
   function pinUrl(color) {
-    const svg = `<svg xmlns="Coffee Mug-RED (1).svg" width="28" height="40" viewBox="0 0 28 40">
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="40" viewBox="0 0 28 40">
       <path d="M14 1.5C7.1 1.5 1.5 7.1 1.5 14c0 9.4 12.5 24.5 12.5 24.5S26.5 23.4 26.5 14C26.5 7.1 20.9 1.5 14 1.5z"
         fill="${color}" stroke="#fff" stroke-width="2.5"/>
       <circle cx="14" cy="14" r="5" fill="#fff"/></svg>`;
@@ -354,6 +362,14 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
     height: SI.height || 40,
     yoffset: SI.yoffset ?? (SI.url ? 0 : 20)
   });
+
+  // A bigger version of the selected icon marks the exact location picked
+  // within a chain; the chain's other locations keep the normal selected icon.
+  const FOCUS_SCALE = Number(CONFIG.focusedIconScale) || 1.5;
+  const focusedSymbol = selectedSymbol.clone();
+  focusedSymbol.width = selectedSymbol.width * FOCUS_SCALE;
+  focusedSymbol.height = selectedSymbol.height * FOCUS_SCALE;
+  focusedSymbol.yoffset = selectedSymbol.yoffset * FOCUS_SCALE;
 
   /* ---------- photos ---------- */
   const P = CONFIG.photos || {};
@@ -547,6 +563,8 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
       .sort((a, b) => a.name.localeCompare(b.name, "en", { numeric: true }) || byAddress(a, b));
     renderCount();
     renderList();
+    // Keep the picked chain location highlighted after the list is rebuilt
+    if (selectedId != null && focusedOid != null) markLocation(selectedId, focusedOid, false);
     syncMap();
   }
 
@@ -580,7 +598,8 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
         <button type="button" class="go" data-goto="${esc(l.oid)}">Show on map</button>
         ${l.phone ? `<span class="ph">${phoneLink(l.phone)}</span>` : ""}
       </li>`).join("");
-    return `${top.join("")}<h3>Locations</h3><ul class="locs">${locs}</ul>`;
+    return `${top.join("")}<h3>Locations</h3><ul class="locs">${locs}</ul>
+      <button type="button" class="link-btn all-locs" data-all>Show all ${r.locs.length} locations</button>`;
   }
 
   function cardHtml(r) {
@@ -621,6 +640,7 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
 
   // Shows the filtered shops on the map. The selected shop's normal symbol is
   // hidden and the selected icon is drawn at each of its locations instead.
+  // Within a chain, the picked location gets the bigger icon.
   function syncMap() {
     if (!layerView) return;
     const sel = selectedId != null && filtered.some((r) => r.id === selectedId)
@@ -631,8 +651,13 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
 
     selectionLayer.removeAll();
     if (sel) {
-      selectionLayer.addMany(sel.locs.map((l) => new Graphic({
-        geometry: l.geometry, symbol: selectedSymbol, attributes: { oid: l.oid }
+      const focus = sel.grouped ? focusedOid : null;
+      // The picked location is added last so it draws on top
+      const locs = sel.locs.slice().sort((a, b) => (a.oid === focus) - (b.oid === focus));
+      selectionLayer.addMany(locs.map((l) => new Graphic({
+        geometry: l.geometry,
+        symbol: l.oid === focus ? focusedSymbol : selectedSymbol,
+        attributes: { oid: l.oid }
       })));
     }
   }
@@ -650,6 +675,7 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
   // Marks a shop as selected on the map and in the list. For a combined chain,
   // every location gets the selected icon and the other shops fade back.
   function setSelected(id) {
+    if (id !== selectedId) focusedOid = null;
     selectedId = id;
     const r = id != null ? byId.get(id) : null;
     syncMap();
@@ -672,7 +698,7 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
       .catch(() => {});
   }
 
-  function markLocation(id, oid) {
+  function markLocation(id, oid, scroll = true) {
     const card = cardEl(id);
     if (!card) return;
     let hit = null;
@@ -681,7 +707,33 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
       li.classList.toggle("here", on);
       if (on) hit = li;
     });
-    if (hit) hit.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
+    if (hit && scroll) hit.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "nearest" });
+  }
+
+  // Picks one exact location of a combined chain: bigger icon on the map,
+  // highlighted row in the list, and the map moves to it.
+  function focusLocation(id, oid, { zoom = true } = {}) {
+    const r = byId.get(id);
+    const loc = r && r.locs.find((l) => String(l.oid) === String(oid));
+    if (!loc) return;
+    if (selectedId !== id) setSelected(id);
+    focusedOid = loc.oid;
+    syncMap();
+    markLocation(id, loc.oid);
+    if (zoom) {
+      const z = Number(CONFIG.focusedZoom) || 18;
+      view.goTo({ target: loc.geometry, zoom: Math.max(view.zoom, z) }, moveOpts()).catch(() => {});
+    }
+  }
+
+  // Goes back to showing every location of the chain
+  function showAllLocations(id) {
+    const r = byId.get(id);
+    if (!r) return;
+    focusedOid = null;
+    syncMap();
+    markLocation(id, null);
+    zoomTo(r);
   }
 
   function goHome() {
@@ -738,16 +790,10 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
     if (e.target.closest('[data-action="reset"]')) { resetFilters(); return; }
 
     const go = e.target.closest("[data-goto]");
-    if (go) {
-      const id = go.closest(".card").dataset.id;
-      const r = byId.get(id);
-      const loc = r && r.locs.find((l) => String(l.oid) === go.dataset.goto);
-      if (!loc) return;
-      if (selectedId !== id) setSelected(id);
-      markLocation(id, loc.oid);
-      view.goTo({ target: loc.geometry, zoom: Math.max(view.zoom, 17) }, moveOpts()).catch(() => {});
-      return;
-    }
+    if (go) { focusLocation(go.closest(".card").dataset.id, go.dataset.goto); return; }
+
+    const all = e.target.closest("[data-all]");
+    if (all) { showAllLocations(all.closest(".card").dataset.id); return; }
 
     const btn = e.target.closest(".more");
     if (!btn) return;
@@ -788,12 +834,17 @@ const TYPES = CONFIG.businessTypes.map((t) => ({ ...t, values: [].concat(t.value
     const r = byId.get(id);
 
     if (id === selectedId) {
-      if (r.grouped) { markLocation(id, oid); return; }
+      if (r.grouped) {
+        // Clicking the picked store again zooms back out to the whole chain
+        if (String(oid) === String(focusedOid)) showAllLocations(id);
+        else focusLocation(id, oid);
+        return;
+      }
       toggleDetails(id, { open: false });
       return;
     }
-    toggleDetails(id, { open: true, scroll: true, zoom: r.grouped });
-    if (r.grouped) markLocation(id, oid);
+    toggleDetails(id, { open: true, scroll: true });
+    if (r.grouped) focusLocation(id, oid);
     const c = cardEl(id);
     if (c) c.querySelector(".more").focus({ preventScroll: true });
   });
